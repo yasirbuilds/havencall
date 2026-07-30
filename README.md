@@ -1,17 +1,15 @@
 # Video call app
 
-This is a two-person WebRTC video call app. A small Socket.IO signaling server is included so separate browsers and devices can discover each other and exchange WebRTC connection details.
+A two-person WebRTC video call app with native WebSocket signaling. It supports local Node.js development and Vercel WebSocket Functions.
 
-## Getting started
-
-Install dependencies and run the development server:
+## Local development
 
 ```bash
 npm install
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000), join a room, and open its invite link in the other browser. `npm run dev` starts both Next.js and the same-origin Socket.IO signaling endpoint.
+Open [http://localhost:3001](http://localhost:3001), join a room, and open its invite link in another browser. The bundled `server.mjs` serves Next.js and the local WebSocket endpoint together.
 
 For a production-style local run:
 
@@ -20,12 +18,32 @@ npm run build
 npm start
 ```
 
-## Signaling configuration
+## Deploy to Vercel
 
-No signaling environment variables are needed. Browsers connect to the Socket.IO server on the same origin as the app.
+The Vercel deployment uses `app/api/ws/route.ts`. Fluid Compute is enabled in `vercel.json`, and the browser automatically connects to `/api/ws` on the deployment's HTTPS domain.
 
-## Deployment note
+Vercel can place two callers on different Function instances, so a Redis relay is required for reliable real-device calls:
 
-The included custom server requires a long-running Node.js host with WebSocket support. Deploy the Next.js app and `server.mjs` together using `npm start`.
+1. Import the repository into Vercel.
+2. Add an Upstash Redis integration to the project, or provide another Redis service.
+3. Confirm the integration created a `REDIS_URL` environment variable for Production and Preview.
+4. Redeploy the project after adding Redis.
 
-For reliable calls between restrictive corporate or mobile networks, configure a TURN server in addition to the existing public STUN server.
+With the Vercel CLI, the equivalent setup is:
+
+```bash
+vercel link
+vercel integration add upstash
+vercel --prod
+```
+
+No public frontend environment variable is required. `REDIS_URL` is server-only and must not be prefixed with `NEXT_PUBLIC_`.
+
+## How signaling works
+
+- Locally, `server.mjs` relays WebSocket messages in one Node.js process.
+- On Vercel, the `/api/ws` Function relays messages to sockets on the same instance.
+- Redis pub/sub forwards the same transient signaling messages between Vercel Function instances.
+- Video and audio remain peer-to-peer through WebRTC; Redis never carries media.
+
+The client automatically reconnects the signaling socket when a Vercel Function reaches its duration limit. An established WebRTC media connection continues independently.

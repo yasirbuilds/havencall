@@ -13,7 +13,6 @@ import {
   Video,
   VideoOff,
 } from "lucide-react";
-import type { Socket } from "socket.io-client";
 
 type SignalMessage =
   | { type: "room-check"; roomId: string; peerId: string; requestId: string }
@@ -25,6 +24,8 @@ type SignalMessage =
   | { type: "candidate"; roomId: string; peerId: string; candidate: RTCIceCandidateInit }
   | { type: "media-state"; roomId: string; peerId: string; micOn: boolean; cameraOn: boolean }
   | { type: "leave"; roomId: string; peerId: string };
+
+type SignalListener = (message: SignalMessage) => void | Promise<void>;
 
 const maxRoomMembers = 2;
 const roomCheckTimeoutMs = 650;
@@ -59,7 +60,11 @@ export default function VideoCall() {
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const videoSenderRef = useRef<RTCRtpSender | null>(null);
   const audioSenderRef = useRef<RTCRtpSender | null>(null);
-  const socketRef = useRef<Socket | null>(null);
+  const socketRef = useRef<WebSocket | null>(null);
+  const signalListenersRef = useRef<Set<SignalListener>>(new Set());
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reconnectAttemptRef = useRef(0);
+  const shouldReconnectRef = useRef(false);
   const joinedRef = useRef(false);
   const makingOfferRef = useRef(false);
   const hasSentOfferRef = useRef(false);
@@ -95,7 +100,10 @@ export default function VideoCall() {
 
   const sendSignal = useCallback(
     (message: SignalMessage) => {
-      socketRef.current?.emit("signal", message);
+      const socket = socketRef.current;
+      if (socket?.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ type: "signal", message }));
+      }
     },
     []
   );
@@ -117,8 +125,16 @@ export default function VideoCall() {
     localStreamRef.current = null;
     remoteStreamRef.current?.getTracks().forEach((track) => track.stop());
     remoteStreamRef.current = null;
-    socketRef.current?.disconnect();
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+    shouldReconnectRef.current = false;
+    const socket = socketRef.current;
     socketRef.current = null;
+    socket?.close();
+    signalListenersRef.current.clear();
+    reconnectAttemptRef.current = 0;
     joinedRef.current = false;
     makingOfferRef.current = false;
     hasSentOfferRef.current = false;
@@ -252,10 +268,12 @@ export default function VideoCall() {
   }, [cleanRoomId, clearDisconnectTimer, clearRemotePeer, peerId, sendSignal]);
 
   const makeOffer = useCallback(async () => {
+    if (makingOfferRef.current || hasSentOfferRef.current) return;
+
     const pc = getPeerConnection();
     makingOfferRef.current = true;
     try {
-      if (hasSentOfferRef.current || pc.signalingState !== "stable") return;
+      if (pc.signalingState !== "stable") return;
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
       hasSentOfferRef.current = true;
@@ -412,7 +430,7 @@ export default function VideoCall() {
       const finish = (canJoin: boolean) => {
         if (settled) return;
         settled = true;
-        socketRef.current?.off("signal", onSignal);
+        signalListenersRef.current.delete(onSignal);
         resolve(canJoin);
       };
 
@@ -435,12 +453,101 @@ export default function VideoCall() {
         }
       };
 
-      socketRef.current?.on("signal", onSignal);
+      signalListenersRef.current.add(onSignal);
 
       sendSignal({ type: "room-check", roomId: cleanRoomId, peerId, requestId });
       window.setTimeout(() => finish(true), roomCheckTimeoutMs);
     });
   }, [cleanRoomId, peerId, sendSignal]);
+
+  const connectSignaling = useCallback(() => {
+    const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+    const socketUrl = `${protocol}://${window.location.host}/api/ws`;
+    shouldReconnectRef.current = true;
+
+    return new Promise<void>((resolve, reject) => {
+      let initialConnectionPending = true;
+      const initialTimeout = window.setTimeout(() => {
+        if (!initialConnectionPending) return;
+        initialConnectionPending = false;
+        reject(new Error("Signaling connection timed out"));
+        socketRef.current?.close();
+      }, 5000);
+
+      const connect = () => {
+        if (!shouldReconnectRef.current) return;
+
+        const socket = new WebSocket(socketUrl);
+        socketRef.current = socket;
+
+        socket.onopen = () => {
+          reconnectAttemptRef.current = 0;
+          socket.send(JSON.stringify({ type: "join-room", roomId: cleanRoomId, peerId }));
+
+          if (joinedRef.current) {
+            socket.send(
+              JSON.stringify({
+                type: "signal",
+                message: { type: "ready", roomId: cleanRoomId, peerId },
+              })
+            );
+            socket.send(
+              JSON.stringify({
+                type: "signal",
+                message: {
+                  type: "media-state",
+                  roomId: cleanRoomId,
+                  peerId,
+                  micOn: micOnRef.current,
+                  cameraOn: cameraOnRef.current,
+                },
+              })
+            );
+          }
+
+          if (initialConnectionPending) {
+            initialConnectionPending = false;
+            window.clearTimeout(initialTimeout);
+            resolve();
+          }
+        };
+
+        socket.onmessage = (event) => {
+          try {
+            const message = JSON.parse(String(event.data)) as SignalMessage;
+            if (!message || typeof message !== "object" || typeof message.type !== "string") {
+              return;
+            }
+            signalListenersRef.current.forEach((listener) => {
+              void listener(message);
+            });
+          } catch {
+            // Ignore malformed signaling frames.
+          }
+        };
+
+        socket.onerror = () => socket.close();
+        socket.onclose = () => {
+          if (socketRef.current !== socket) return;
+          socketRef.current = null;
+          if (!shouldReconnectRef.current) return;
+
+          if (initialConnectionPending) {
+            initialConnectionPending = false;
+            window.clearTimeout(initialTimeout);
+            reject(new Error("Unable to open signaling connection"));
+            return;
+          }
+
+          const delay = Math.min(1000 * 2 ** reconnectAttemptRef.current, 30_000);
+          reconnectAttemptRef.current += 1;
+          reconnectTimerRef.current = setTimeout(connect, delay);
+        };
+      };
+
+      connect();
+    });
+  }, [cleanRoomId, peerId]);
 
   const joinRoom = useCallback(async () => {
     try {
@@ -451,44 +558,7 @@ export default function VideoCall() {
       setStatus("Checking room...");
 
       if (!socketRef.current) {
-        const { io } = await import("socket.io-client");
-        const socket = io({
-          transports: ["websocket", "polling"],
-          timeout: 5000,
-        });
-        socketRef.current = socket;
-
-        socket.on("connect", () => {
-          socket.emit("join-room", { roomId: cleanRoomId, peerId });
-          if (joinedRef.current) {
-            socket.emit("signal", { type: "ready", roomId: cleanRoomId, peerId });
-            socket.emit("signal", {
-              type: "media-state",
-              roomId: cleanRoomId,
-              peerId,
-              micOn: micOnRef.current,
-              cameraOn: cameraOnRef.current,
-            });
-          }
-        });
-
-        await new Promise<void>((resolve, reject) => {
-          if (socket.connected) {
-            resolve();
-            return;
-          }
-
-          const onConnect = () => {
-            socket.off("connect_error", onError);
-            resolve();
-          };
-          const onError = (error: Error) => {
-            socket.off("connect", onConnect);
-            reject(error);
-          };
-          socket.once("connect", onConnect);
-          socket.once("connect_error", onError);
-        });
+        await connectSignaling();
       }
 
       const canJoin = await checkRoomCapacity();
@@ -497,7 +567,7 @@ export default function VideoCall() {
         return;
       }
 
-      socketRef.current?.on("signal", handleSignal);
+      signalListenersRef.current.add(handleSignal);
 
       setStatus("Opening camera...");
       await startMedia();
@@ -520,7 +590,7 @@ export default function VideoCall() {
           : "Unable to reach the signaling server"
       );
     }
-  }, [checkRoomCapacity, cleanRoomId, handleSignal, peerId, resetCallState, sendMediaState, sendSignal, startMedia]);
+  }, [checkRoomCapacity, cleanRoomId, connectSignaling, handleSignal, peerId, resetCallState, sendMediaState, sendSignal, startMedia]);
 
   const leaveRoom = useCallback(() => {
     if (joinedRef.current) sendSignal({ type: "leave", roomId: cleanRoomId, peerId });
