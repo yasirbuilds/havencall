@@ -8,6 +8,8 @@ import {
   MicOff,
   PhoneOff,
   Plus,
+  ShieldCheck,
+  Users,
   Video,
   VideoOff,
 } from "lucide-react";
@@ -21,6 +23,7 @@ type SignalMessage =
   | { type: "offer"; roomId: string; peerId: string; sdp: RTCSessionDescriptionInit }
   | { type: "answer"; roomId: string; peerId: string; sdp: RTCSessionDescriptionInit }
   | { type: "candidate"; roomId: string; peerId: string; candidate: RTCIceCandidateInit }
+  | { type: "media-state"; roomId: string; peerId: string; micOn: boolean; cameraOn: boolean }
   | { type: "leave"; roomId: string; peerId: string };
 
 const maxRoomMembers = 2;
@@ -42,13 +45,16 @@ export default function VideoCall() {
   const [origin, setOrigin] = useState("");
   const [copied, setCopied] = useState(false);
   const [remoteReady, setRemoteReady] = useState(false);
-  const [remoteMessage, setRemoteMessage] = useState("Waiting");
+  const [remoteMicOn, setRemoteMicOn] = useState(true);
+  const [remoteCameraOn, setRemoteCameraOn] = useState(true);
   const [roomFull, setRoomFull] = useState(false);
 
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const remoteStreamRef = useRef<MediaStream | null>(null);
+  const micOnRef = useRef(true);
+  const cameraOnRef = useRef(true);
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const videoSenderRef = useRef<RTCRtpSender | null>(null);
   const audioSenderRef = useRef<RTCRtpSender | null>(null);
@@ -59,6 +65,7 @@ export default function VideoCall() {
   const hasSentOfferRef = useRef(false);
   const hasRemoteDescriptionRef = useRef(false);
   const knownPeerIdsRef = useRef<Set<string>>(new Set());
+  const readyReplyPeerIdsRef = useRef<Set<string>>(new Set());
   const disconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const signalingUrl = process.env.NEXT_PUBLIC_SIGNALING_SERVER_URL;
@@ -79,6 +86,12 @@ export default function VideoCall() {
       window.history.replaceState(null, "", `/?room=${freshRoom}`);
     }, 0);
   }, []);
+
+  useEffect(() => {
+    if (remoteReady && remoteVideoRef.current && remoteStreamRef.current) {
+      remoteVideoRef.current.srcObject = remoteStreamRef.current;
+    }
+  }, [remoteCameraOn, remoteReady]);
 
   const sendSignal = useCallback(
     (message: SignalMessage) => {
@@ -114,6 +127,7 @@ export default function VideoCall() {
     hasSentOfferRef.current = false;
     hasRemoteDescriptionRef.current = false;
     knownPeerIdsRef.current.clear();
+    readyReplyPeerIdsRef.current.clear();
     if (remoteVideoRef.current) {
       remoteVideoRef.current.pause();
       remoteVideoRef.current.srcObject = null;
@@ -121,13 +135,18 @@ export default function VideoCall() {
       remoteVideoRef.current.load();
     }
     setJoined(false);
+    micOnRef.current = true;
+    cameraOnRef.current = true;
+    setMicOn(true);
+    setCameraOn(true);
     setRemoteReady(false);
-    setRemoteMessage("Waiting");
+    setRemoteMicOn(true);
+    setRemoteCameraOn(true);
     setRoomFull(nextRoomFull);
     setStatus(nextStatus);
   }, [clearDisconnectTimer]);
 
-  const clearRemotePeer = useCallback((nextStatus: string, nextRemoteMessage = "Guest left") => {
+  const clearRemotePeer = useCallback((nextStatus: string) => {
     clearDisconnectTimer();
     pcRef.current?.close();
     pcRef.current = null;
@@ -142,13 +161,29 @@ export default function VideoCall() {
       remoteVideoRef.current.load();
     }
     knownPeerIdsRef.current.clear();
+    readyReplyPeerIdsRef.current.clear();
     makingOfferRef.current = false;
     hasSentOfferRef.current = false;
     hasRemoteDescriptionRef.current = false;
     setRemoteReady(false);
-    setRemoteMessage(nextRemoteMessage);
+    setRemoteMicOn(true);
+    setRemoteCameraOn(true);
     setStatus(nextStatus);
   }, [clearDisconnectTimer]);
+
+  const sendMediaState = useCallback(
+    (nextMicOn = micOnRef.current, nextCameraOn = cameraOnRef.current) => {
+      if (!joinedRef.current) return;
+      sendSignal({
+        type: "media-state",
+        roomId: cleanRoomId,
+        peerId,
+        micOn: nextMicOn,
+        cameraOn: nextCameraOn,
+      });
+    },
+    [cleanRoomId, peerId, sendSignal]
+  );
 
   const getPeerConnection = useCallback(() => {
     if (pcRef.current) return pcRef.current;
@@ -157,12 +192,19 @@ export default function VideoCall() {
     remoteStreamRef.current = new MediaStream();
 
     pc.ontrack = (event) => {
-      event.streams[0].getTracks().forEach((track) => remoteStreamRef.current?.addTrack(track));
+      event.streams[0].getTracks().forEach((track) => {
+        remoteStreamRef.current?.addTrack(track);
+        if (track.kind === "video") {
+          setRemoteCameraOn(track.readyState === "live" && !track.muted);
+          track.onmute = () => setRemoteCameraOn(false);
+          track.onunmute = () => setRemoteCameraOn(true);
+          track.onended = () => setRemoteCameraOn(false);
+        }
+      });
       if (remoteVideoRef.current && remoteStreamRef.current) {
         remoteVideoRef.current.srcObject = remoteStreamRef.current;
       }
       setRemoteReady(true);
-      setRemoteMessage("Guest");
       clearDisconnectTimer();
       setStatus("Connected");
     };
@@ -181,7 +223,6 @@ export default function VideoCall() {
     pc.onconnectionstatechange = () => {
       if (pc.connectionState === "connected") {
         clearDisconnectTimer();
-        setRemoteMessage("Guest");
         setStatus("Connected");
       }
       if (pc.connectionState === "disconnected") {
@@ -189,7 +230,7 @@ export default function VideoCall() {
         if (!disconnectTimerRef.current) {
           disconnectTimerRef.current = setTimeout(() => {
             if (pcRef.current === pc && pc.connectionState !== "connected") {
-              clearRemotePeer("Guest connection lost", "Guest disconnected");
+              clearRemotePeer("Guest connection lost");
             }
           }, 8000);
         }
@@ -279,10 +320,22 @@ export default function VideoCall() {
 
       knownPeerIdsRef.current.add(message.peerId);
 
+      if (message.type === "media-state") {
+        setRemoteMicOn(message.micOn);
+        setRemoteCameraOn(message.cameraOn);
+        setRemoteReady(true);
+        return;
+      }
+
       try {
         const pc = getPeerConnection();
         if (message.type === "ready") {
           setStatus("Peer joined");
+          if (!readyReplyPeerIdsRef.current.has(message.peerId)) {
+            readyReplyPeerIdsRef.current.add(message.peerId);
+            sendSignal({ type: "ready", roomId: cleanRoomId, peerId });
+          }
+          sendMediaState();
           if (peerId < message.peerId && !hasSentOfferRef.current) {
             await makeOffer();
           }
@@ -322,13 +375,15 @@ export default function VideoCall() {
         setStatus("Signaling message skipped. Rejoin if the call does not connect.");
       }
     },
-    [cleanRoomId, clearRemotePeer, getPeerConnection, makeOffer, peerId, resetCallState, sendSignal]
+    [cleanRoomId, clearRemotePeer, getPeerConnection, makeOffer, peerId, resetCallState, sendMediaState, sendSignal]
   );
 
   const startMedia = useCallback(async () => {
     const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
     localStreamRef.current = stream;
     if (localVideoRef.current) localVideoRef.current.srcObject = stream;
+    micOnRef.current = true;
+    cameraOnRef.current = true;
     setMicOn(true);
     setCameraOn(true);
   }, []);
@@ -380,7 +435,6 @@ export default function VideoCall() {
       setShareUrl(nextUrl);
       window.history.replaceState(null, "", `/?room=${cleanRoomId}`);
       setRoomFull(false);
-      setRemoteMessage("Waiting");
       setStatus("Checking room...");
 
       channelRef.current?.close();
@@ -411,13 +465,14 @@ export default function VideoCall() {
         setTimeout(() => {
           if (joinedRef.current) {
             sendSignal({ type: "ready", roomId: cleanRoomId, peerId });
+            sendMediaState();
           }
         }, delay);
       });
     } catch {
       resetCallState("Camera or microphone permission was blocked");
     }
-  }, [checkRoomCapacity, cleanRoomId, handleSignal, peerId, resetCallState, sendSignal, signalingUrl, startMedia]);
+  }, [checkRoomCapacity, cleanRoomId, handleSignal, peerId, resetCallState, sendMediaState, sendSignal, signalingUrl, startMedia]);
 
   const leaveRoom = useCallback(() => {
     if (joinedRef.current) sendSignal({ type: "leave", roomId: cleanRoomId, peerId });
@@ -443,10 +498,13 @@ export default function VideoCall() {
   }, [cleanRoomId, peerId, sendSignal]);
 
   const toggleMic = () => {
+    const nextMicOn = !micOnRef.current;
     localStreamRef.current?.getAudioTracks().forEach((track) => {
-      track.enabled = !track.enabled;
-      setMicOn(track.enabled);
+      track.enabled = nextMicOn;
     });
+    micOnRef.current = nextMicOn;
+    setMicOn(nextMicOn);
+    sendMediaState(nextMicOn, cameraOnRef.current);
   };
 
   const toggleCamera = async () => {
@@ -460,7 +518,9 @@ export default function VideoCall() {
       });
       await videoSenderRef.current?.replaceTrack(null);
       if (localVideoRef.current) localVideoRef.current.srcObject = stream;
+      cameraOnRef.current = false;
       setCameraOn(false);
+      sendMediaState(micOnRef.current, false);
       return;
     }
 
@@ -474,7 +534,9 @@ export default function VideoCall() {
         videoSenderRef.current = pcRef.current.addTrack(videoTrack, stream);
       }
       if (localVideoRef.current) localVideoRef.current.srcObject = stream;
+      cameraOnRef.current = true;
       setCameraOn(true);
+      sendMediaState(micOnRef.current, true);
     } catch {
       setStatus("Camera permission was blocked");
     }
@@ -487,19 +549,25 @@ export default function VideoCall() {
   };
 
   return (
-    <main className="min-h-screen bg-[#0f0f10] text-white">
-      <header className="flex min-h-16 items-center justify-between border-b border-white/8 bg-[#141416] px-4 sm:px-6">
-        <div>
-          <p className="text-sm text-white/55">Private call</p>
-          <h1 className="text-xl font-semibold tracking-normal">Room {cleanRoomId}</h1>
+    <main className="call-shell">
+      <header className="call-header">
+        <div className="min-w-0">
+          <div className="call-eyebrow">
+            <ShieldCheck size={15} />
+            <span>Private call</span>
+          </div>
+          <h1 className="call-title">Room {cleanRoomId}</h1>
         </div>
-        <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-sm text-white/75">{status}</span>
+        <div className="status-pill">
+          <span className={joined ? "status-dot status-dot-live" : "status-dot"} />
+          <span>{status}</span>
+        </div>
       </header>
 
-      <section className="grid min-h-[calc(100vh-8rem)] gap-3 p-3 lg:grid-cols-[1fr_300px]">
-        <div className="grid gap-3 md:grid-cols-2">
+      <section className="call-workspace">
+        <div className={`video-stage ${remoteReady ? "video-stage-split" : ""}`}>
           {roomFull && !joined ? (
-            <div className="video-tile md:col-span-2">
+            <div className="video-tile">
               <div className="avatar">
                 <div className="max-w-sm px-5 text-center">
                   <p className="text-2xl font-semibold">Room full</p>
@@ -511,22 +579,42 @@ export default function VideoCall() {
             <>
               <div className="video-tile">
                 <video ref={localVideoRef} autoPlay playsInline muted className="video-feed" />
-                <div className="tile-label">You {micOn ? "" : "(muted)"}</div>
+                <div className="tile-label">
+                  <span>You</span>
+                  {!micOn && <span className="tile-muted">Muted</span>}
+                </div>
                 {!cameraOn && <div className="avatar">You</div>}
               </div>
-              <div className="video-tile">
-                <video ref={remoteVideoRef} autoPlay playsInline className="video-feed" />
-                {!remoteReady && <div className="avatar">{remoteMessage}</div>}
-                <div className="tile-label">Guest</div>
-              </div>
+              {remoteReady && (
+                <div className="video-tile">
+                  <video
+                    ref={remoteVideoRef}
+                    autoPlay
+                    playsInline
+                    className={`video-feed ${remoteCameraOn ? "" : "video-feed-hidden"}`}
+                  />
+                  {!remoteCameraOn && <div className="avatar">Guest</div>}
+                  <div className="tile-label">
+                    <span>Guest</span>
+                    {!remoteMicOn && <span className="tile-muted">Muted</span>}
+                    {!remoteCameraOn && <span className="tile-camera-off">Camera off</span>}
+                  </div>
+                </div>
+              )}
             </>
           )}
         </div>
 
-        <aside className="flex flex-col gap-4 border-t border-white/10 pt-3 lg:border-l lg:border-t-0 lg:pl-3 lg:pt-0">
+        <aside className="call-sidebar">
           <div className="panel">
-            <label className="text-sm text-white/60" htmlFor="room">Room code</label>
-            <div className="mt-2 flex gap-2">
+            <div className="panel-heading">
+              <div>
+                <p className="panel-label">Room code</p>
+                <p className="panel-title">{cleanRoomId}</p>
+              </div>
+              <Users size={18} />
+            </div>
+            <div className="room-row">
               <input
                 id="room"
                 value={roomId}
@@ -538,7 +626,7 @@ export default function VideoCall() {
                   }
                 }}
                 disabled={joined}
-                className="min-w-0 flex-1 rounded-md border border-white/15 bg-white/8 px-3 py-2 text-white outline-none focus:border-white/45"
+                className="room-input"
               />
               <button
                 className="icon-button"
@@ -557,16 +645,16 @@ export default function VideoCall() {
           </div>
 
           {roomFull && (
-            <div className="panel border-[#fbbc04]/35 bg-[#fbbc04]/10">
-              <p className="text-sm font-semibold text-[#fbbc04]">Room is full</p>
+            <div className="notice-panel">
+              <p className="text-sm font-semibold text-[#ffc857]">Room is full</p>
               <p className="mt-2 text-sm text-white/75">This call only supports two people. Start a new room or wait for someone to leave.</p>
             </div>
           )}
 
           <div className="panel">
-            <p className="text-sm text-white/60">Invite link</p>
-            <p className="mt-2 break-all text-sm text-white/80">{shareUrl || `${origin}/?room=${cleanRoomId}`}</p>
-            <button className="mt-3 w-full secondary-button" onClick={copyInvite}>
+            <p className="panel-label">Invite link</p>
+            <p className="invite-link">{shareUrl || `${origin}/?room=${cleanRoomId}`}</p>
+            <button className="secondary-button w-full" onClick={copyInvite}>
               <Copy size={18} />
               {copied ? "Copied" : "Copy link"}
             </button>
@@ -574,7 +662,7 @@ export default function VideoCall() {
         </aside>
       </section>
 
-      <footer className="fixed inset-x-0 bottom-0 flex h-16 items-center justify-center gap-3 border-t border-white/10 bg-[#151515]/95 px-3 backdrop-blur">
+      <footer className="control-dock">
         {!joined ? (
           <button className={roomFull ? "secondary-button" : "primary-button"} onClick={joinRoom}>
             <LogIn size={20} />
