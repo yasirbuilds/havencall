@@ -9,7 +9,6 @@ import {
   PhoneOff,
   Plus,
   ShieldCheck,
-  Users,
   Video,
   VideoOff,
 } from "lucide-react";
@@ -551,16 +550,65 @@ export default function VideoCall() {
   return (
     <main className="call-shell">
       <header className="call-header">
-        <div className="min-w-0">
-          <div className="call-eyebrow">
-            <ShieldCheck size={15} />
-            <span>Private call</span>
+        <div className="call-brand">
+          <div className="brand-mark" aria-hidden="true">
+            <Video size={20} strokeWidth={2.2} />
           </div>
-          <h1 className="call-title">Room {cleanRoomId}</h1>
+          <div className="min-w-0">
+            <div className="call-eyebrow">
+              <ShieldCheck size={14} />
+              <span>Private meeting</span>
+            </div>
+            <h1 className="call-title">Room {cleanRoomId}</h1>
+          </div>
         </div>
-        <div className="status-pill">
+
+        <div className="header-room-tools">
+          <label className="header-room-field" htmlFor="room">
+            <span className="header-tool-label">Meeting ID</span>
+            <input
+              id="room"
+              value={roomId}
+              onChange={(event) => {
+                setRoomId(event.target.value.toUpperCase());
+                if (!joined) {
+                  setRoomFull(false);
+                  setStatus("Idle");
+                }
+              }}
+              disabled={joined}
+              className="header-room-input"
+              aria-label="Meeting ID"
+            />
+          </label>
+          <button
+            className="header-icon-button"
+            onClick={() => {
+              setRoomId(makeRoomId());
+              setRoomFull(false);
+              setStatus("Idle");
+            }}
+            disabled={joined}
+            title="Create a new room"
+            aria-label="Create a new room"
+          >
+            <Plus size={19} />
+          </button>
+          <span className="header-divider" aria-hidden="true" />
+          <button
+            className="invite-button"
+            onClick={copyInvite}
+            title={shareUrl || `${origin}/?room=${cleanRoomId}`}
+            aria-label="Copy invite link"
+          >
+            <Copy size={18} />
+            <span>{copied ? "Copied" : "Copy invite"}</span>
+          </button>
+        </div>
+
+        <div className="status-pill" title={status}>
           <span className={joined ? "status-dot status-dot-live" : "status-dot"} />
-          <span>{status}</span>
+          <span className="status-text">{status}</span>
         </div>
       </header>
 
@@ -579,11 +627,36 @@ export default function VideoCall() {
             <>
               <div className="video-tile">
                 <video ref={localVideoRef} autoPlay playsInline muted className="video-feed" />
+                {!joined && (
+                  <div className="preview-placeholder">
+                    <div className="placeholder-icon">
+                      <Video size={26} />
+                    </div>
+                    <p>Ready when you are</p>
+                    <span>Your camera preview will appear after you join</span>
+                  </div>
+                )}
                 <div className="tile-label">
+                  <span className="participant-dot" aria-hidden="true" />
                   <span>You</span>
-                  {!micOn && <span className="tile-muted">Muted</span>}
+                  <span className="tile-state-icons">
+                    {!micOn && (
+                      <span className="tile-state-icon tile-state-icon-danger" title="Microphone muted" aria-label="Microphone muted">
+                        <MicOff size={14} />
+                      </span>
+                    )}
+                    {!cameraOn && (
+                      <span className="tile-state-icon tile-state-icon-warning" title="Camera off" aria-label="Camera off">
+                        <VideoOff size={14} />
+                      </span>
+                    )}
+                  </span>
                 </div>
-                {!cameraOn && <div className="avatar">You</div>}
+                {joined && !cameraOn && (
+                  <div className="avatar">
+                    <div className="avatar-orb">Y</div>
+                  </div>
+                )}
               </div>
               {remoteReady && (
                 <div className="video-tile">
@@ -593,73 +666,32 @@ export default function VideoCall() {
                     playsInline
                     className={`video-feed ${remoteCameraOn ? "" : "video-feed-hidden"}`}
                   />
-                  {!remoteCameraOn && <div className="avatar">Guest</div>}
+                  {!remoteCameraOn && (
+                    <div className="avatar">
+                      <div className="avatar-orb avatar-orb-guest">G</div>
+                    </div>
+                  )}
                   <div className="tile-label">
+                    <span className="participant-dot participant-dot-guest" aria-hidden="true" />
                     <span>Guest</span>
-                    {!remoteMicOn && <span className="tile-muted">Muted</span>}
-                    {!remoteCameraOn && <span className="tile-camera-off">Camera off</span>}
+                    <span className="tile-state-icons">
+                      {!remoteMicOn && (
+                        <span className="tile-state-icon tile-state-icon-danger" title="Microphone muted" aria-label="Microphone muted">
+                          <MicOff size={14} />
+                        </span>
+                      )}
+                      {!remoteCameraOn && (
+                        <span className="tile-state-icon tile-state-icon-warning" title="Camera off" aria-label="Camera off">
+                          <VideoOff size={14} />
+                        </span>
+                      )}
+                    </span>
                   </div>
                 </div>
               )}
             </>
           )}
         </div>
-
-        <aside className="call-sidebar">
-          <div className="panel">
-            <div className="panel-heading">
-              <div>
-                <p className="panel-label">Room code</p>
-                <p className="panel-title">{cleanRoomId}</p>
-              </div>
-              <Users size={18} />
-            </div>
-            <div className="room-row">
-              <input
-                id="room"
-                value={roomId}
-                onChange={(event) => {
-                  setRoomId(event.target.value.toUpperCase());
-                  if (!joined) {
-                    setRoomFull(false);
-                    setStatus("Idle");
-                  }
-                }}
-                disabled={joined}
-                className="room-input"
-              />
-              <button
-                className="icon-button"
-                onClick={() => {
-                  setRoomId(makeRoomId());
-                  setRoomFull(false);
-                  setStatus("Idle");
-                }}
-                disabled={joined}
-                title="New room"
-                aria-label="New room"
-              >
-                <Plus size={20} />
-              </button>
-            </div>
-          </div>
-
-          {roomFull && (
-            <div className="notice-panel">
-              <p className="text-sm font-semibold text-[#ffc857]">Room is full</p>
-              <p className="mt-2 text-sm text-white/75">This call only supports two people. Start a new room or wait for someone to leave.</p>
-            </div>
-          )}
-
-          <div className="panel">
-            <p className="panel-label">Invite link</p>
-            <p className="invite-link">{shareUrl || `${origin}/?room=${cleanRoomId}`}</p>
-            <button className="secondary-button w-full" onClick={copyInvite}>
-              <Copy size={18} />
-              {copied ? "Copied" : "Copy link"}
-            </button>
-          </div>
-        </aside>
       </section>
 
       <footer className="control-dock">
@@ -670,10 +702,10 @@ export default function VideoCall() {
           </button>
         ) : (
           <>
-            <button className="control-button" onClick={toggleMic} title={micOn ? "Mute microphone" : "Unmute microphone"} aria-label={micOn ? "Mute microphone" : "Unmute microphone"}>
+            <button className={`control-button ${micOn ? "" : "control-button-off"}`} onClick={toggleMic} title={micOn ? "Mute microphone" : "Unmute microphone"} aria-label={micOn ? "Mute microphone" : "Unmute microphone"}>
               {micOn ? <Mic size={21} /> : <MicOff size={21} />}
             </button>
-            <button className="control-button" onClick={toggleCamera} title={cameraOn ? "Turn camera off" : "Turn camera on"} aria-label={cameraOn ? "Turn camera off" : "Turn camera on"}>
+            <button className={`control-button ${cameraOn ? "" : "control-button-off"}`} onClick={toggleCamera} title={cameraOn ? "Turn camera off" : "Turn camera on"} aria-label={cameraOn ? "Turn camera off" : "Turn camera on"}>
               {cameraOn ? <Video size={21} /> : <VideoOff size={21} />}
             </button>
             <button className="leave-button" onClick={leaveRoom} title="Leave call" aria-label="Leave call">
