@@ -1,5 +1,5 @@
-import VideoCall from "./components/VideoCall";
+import ClientVideoCall from "./components/ClientVideoCall";
 
 export default function Home() {
-  return <VideoCall />;
+  return <ClientVideoCall />;
 }
