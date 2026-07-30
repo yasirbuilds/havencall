@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Copy,
   LogIn,
+  Maximize2,
   Mic,
   MicOff,
   PhoneOff,
@@ -47,6 +48,7 @@ export default function VideoCall() {
   const [remoteMicOn, setRemoteMicOn] = useState(true);
   const [remoteCameraOn, setRemoteCameraOn] = useState(true);
   const [roomFull, setRoomFull] = useState(false);
+  const [mobileLocalPrimary, setMobileLocalPrimary] = useState(false);
 
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
@@ -138,6 +140,7 @@ export default function VideoCall() {
     setRemoteReady(false);
     setRemoteMicOn(true);
     setRemoteCameraOn(true);
+    setMobileLocalPrimary(false);
     setRoomFull(nextRoomFull);
     setStatus(nextStatus);
   }, [clearDisconnectTimer]);
@@ -165,6 +168,7 @@ export default function VideoCall() {
     setRemoteReady(false);
     setRemoteMicOn(true);
     setRemoteCameraOn(true);
+    setMobileLocalPrimary(false);
     setStatus(nextStatus);
   }, [clearDisconnectTimer]);
 
@@ -593,7 +597,7 @@ export default function VideoCall() {
   };
 
   return (
-    <main className="call-shell">
+    <main className={`call-shell ${joined && remoteReady ? "call-shell-connected" : ""}`}>
       <header className="call-header">
         <div className="call-brand">
           <div className="brand-mark" aria-hidden="true">
@@ -670,7 +674,15 @@ export default function VideoCall() {
             </div>
           ) : (
             <>
-              <div className="video-tile">
+              <div
+                className={`video-tile video-tile-local ${
+                  remoteReady
+                    ? mobileLocalPrimary
+                      ? "mobile-video-primary"
+                      : "mobile-video-secondary"
+                    : ""
+                }`}
+              >
                 <video ref={localVideoRef} autoPlay playsInline muted className="video-feed" />
                 {!joined && (
                   <div className="preview-placeholder">
@@ -702,9 +714,23 @@ export default function VideoCall() {
                     <div className="avatar-orb">Y</div>
                   </div>
                 )}
+                {remoteReady && (
+                  <button
+                    type="button"
+                    className="mobile-video-swap-target"
+                    onClick={() => setMobileLocalPrimary(true)}
+                    aria-label="Show your video full screen"
+                  >
+                    <Maximize2 className="mobile-swap-icon" size={16} aria-hidden="true" />
+                  </button>
+                )}
               </div>
               {remoteReady && (
-                <div className="video-tile">
+                <div
+                  className={`video-tile video-tile-remote ${
+                    mobileLocalPrimary ? "mobile-video-secondary" : "mobile-video-primary"
+                  }`}
+                >
                   <video
                     ref={remoteVideoRef}
                     autoPlay
@@ -732,6 +758,14 @@ export default function VideoCall() {
                       )}
                     </span>
                   </div>
+                  <button
+                    type="button"
+                    className="mobile-video-swap-target"
+                    onClick={() => setMobileLocalPrimary(false)}
+                    aria-label="Show guest video full screen"
+                  >
+                    <Maximize2 className="mobile-swap-icon" size={16} aria-hidden="true" />
+                  </button>
                 </div>
               )}
             </>

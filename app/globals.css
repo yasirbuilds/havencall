@@ -326,6 +326,10 @@ input:focus-visible {
   opacity: 0;
 }
 
+.mobile-video-swap-target {
+  display: none;
+}
+
 .preview-placeholder,
 .avatar {
   position: absolute;
@@ -669,6 +673,139 @@ input:focus-visible {
 
   .control-dock {
     bottom: max(12px, env(safe-area-inset-bottom));
+  }
+
+  .call-shell-connected {
+    height: 100dvh;
+    min-height: 100dvh;
+    overflow: hidden;
+    background: #05070b;
+  }
+
+  .call-shell-connected .call-header {
+    position: fixed;
+    z-index: 30;
+    top: 0;
+    right: 0;
+    left: 0;
+    min-height: 88px;
+    border-bottom: 0;
+    background: linear-gradient(180deg, rgb(0 0 0 / 0.74) 0%, rgb(0 0 0 / 0.24) 68%, transparent 100%);
+    padding: max(14px, env(safe-area-inset-top)) 14px 24px;
+    box-shadow: none;
+    backdrop-filter: none;
+  }
+
+  .call-shell-connected .header-room-tools {
+    display: none;
+  }
+
+  .call-shell-connected .call-workspace {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100dvh;
+    padding: 0;
+  }
+
+  .call-shell-connected .video-stage,
+  .call-shell-connected .video-stage-split {
+    position: relative;
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
+
+  .call-shell-connected .video-stage-split .video-tile {
+    position: absolute;
+    min-height: 0;
+    border-radius: 0;
+    transition:
+      inset 220ms ease,
+      width 220ms ease,
+      border-radius 220ms ease,
+      box-shadow 220ms ease,
+      transform 220ms ease;
+  }
+
+  .call-shell-connected .mobile-video-primary {
+    z-index: 1;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    border: 0;
+    box-shadow: none;
+  }
+
+  .call-shell-connected .mobile-video-secondary {
+    z-index: 8;
+    inset: calc(max(14px, env(safe-area-inset-top)) + 82px) 14px auto auto;
+    width: clamp(104px, 31vw, 140px);
+    height: auto;
+    aspect-ratio: 3 / 4;
+    border: 1px solid rgb(255 255 255 / 0.32);
+    border-radius: 16px;
+    box-shadow:
+      0 18px 46px rgb(0 0 0 / 0.5),
+      0 0 0 1px rgb(0 0 0 / 0.22);
+    transform: translateZ(0);
+  }
+
+  .call-shell-connected .video-tile-local .video-feed {
+    transform: scaleX(-1);
+  }
+
+  .call-shell-connected .mobile-video-primary .tile-label {
+    bottom: calc(92px + env(safe-area-inset-bottom));
+  }
+
+  .call-shell-connected .mobile-video-secondary .tile-label {
+    z-index: 6;
+    bottom: 8px;
+    left: 8px;
+    min-height: 27px;
+    max-width: calc(100% - 16px);
+    gap: 5px;
+    padding: 4px 7px;
+    font-size: 11px;
+    pointer-events: none;
+  }
+
+  .call-shell-connected .mobile-video-secondary .participant-dot,
+  .call-shell-connected .mobile-video-secondary .tile-state-icons {
+    display: none;
+  }
+
+  .call-shell-connected .mobile-video-secondary .avatar-orb {
+    width: 62px;
+    font-size: 24px;
+  }
+
+  .call-shell-connected .mobile-video-secondary .mobile-video-swap-target {
+    position: absolute;
+    z-index: 5;
+    inset: 0;
+    display: block;
+    width: 100%;
+    height: 100%;
+    border: 0;
+    border-radius: inherit;
+    background: transparent;
+    color: white;
+  }
+
+  .call-shell-connected .mobile-swap-icon {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    width: 28px;
+    height: 28px;
+    border: 1px solid rgb(255 255 255 / 0.16);
+    border-radius: 50%;
+    background: rgb(4 7 12 / 0.58);
+    padding: 6px;
+    filter: drop-shadow(0 4px 8px rgb(0 0 0 / 0.3));
+    backdrop-filter: blur(10px);
   }
 }
 
