@@ -57,17 +57,16 @@ export default function VideoCall() {
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const videoSenderRef = useRef<RTCRtpSender | null>(null);
   const audioSenderRef = useRef<RTCRtpSender | null>(null);
-  const channelRef = useRef<BroadcastChannel | null>(null);
   const socketRef = useRef<Socket | null>(null);
   const joinedRef = useRef(false);
   const makingOfferRef = useRef(false);
   const hasSentOfferRef = useRef(false);
   const hasRemoteDescriptionRef = useRef(false);
+  const pendingCandidatesRef = useRef<RTCIceCandidateInit[]>([]);
   const knownPeerIdsRef = useRef<Set<string>>(new Set());
   const readyReplyPeerIdsRef = useRef<Set<string>>(new Set());
   const disconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const signalingUrl = process.env.NEXT_PUBLIC_SIGNALING_SERVER_URL;
   const cleanRoomId = useMemo(() => roomId.trim().toUpperCase() || "MEET", [roomId]);
 
   useEffect(() => {
@@ -94,7 +93,6 @@ export default function VideoCall() {
 
   const sendSignal = useCallback(
     (message: SignalMessage) => {
-      channelRef.current?.postMessage(message);
       socketRef.current?.emit("signal", message);
     },
     []
@@ -117,14 +115,13 @@ export default function VideoCall() {
     localStreamRef.current = null;
     remoteStreamRef.current?.getTracks().forEach((track) => track.stop());
     remoteStreamRef.current = null;
-    channelRef.current?.close();
-    channelRef.current = null;
     socketRef.current?.disconnect();
     socketRef.current = null;
     joinedRef.current = false;
     makingOfferRef.current = false;
     hasSentOfferRef.current = false;
     hasRemoteDescriptionRef.current = false;
+    pendingCandidatesRef.current = [];
     knownPeerIdsRef.current.clear();
     readyReplyPeerIdsRef.current.clear();
     if (remoteVideoRef.current) {
@@ -164,6 +161,7 @@ export default function VideoCall() {
     makingOfferRef.current = false;
     hasSentOfferRef.current = false;
     hasRemoteDescriptionRef.current = false;
+    pendingCandidatesRef.current = [];
     setRemoteReady(false);
     setRemoteMicOn(true);
     setRemoteCameraOn(true);
@@ -264,6 +262,14 @@ export default function VideoCall() {
     }
   }, [cleanRoomId, getPeerConnection, peerId, sendSignal]);
 
+  const addPendingCandidates = useCallback(async (pc: RTCPeerConnection) => {
+    const candidates = pendingCandidatesRef.current;
+    pendingCandidatesRef.current = [];
+    for (const candidate of candidates) {
+      await pc.addIceCandidate(candidate);
+    }
+  }, []);
+
   const handleSignal = useCallback(
     async (message: SignalMessage) => {
       if (message.roomId !== cleanRoomId || message.peerId === peerId) return;
@@ -351,6 +357,7 @@ export default function VideoCall() {
           }
           await pc.setRemoteDescription(message.sdp);
           hasRemoteDescriptionRef.current = true;
+          await addPendingCandidates(pc);
           const answer = await pc.createAnswer();
           if (pc.signalingState !== "have-remote-offer") return;
           await pc.setLocalDescription(answer);
@@ -362,11 +369,15 @@ export default function VideoCall() {
           if (pc.signalingState !== "have-local-offer") return;
           await pc.setRemoteDescription(message.sdp);
           hasRemoteDescriptionRef.current = true;
+          await addPendingCandidates(pc);
           setStatus("Connecting...");
         }
 
         if (message.type === "candidate") {
-          if (!pc.remoteDescription) return;
+          if (!pc.remoteDescription) {
+            pendingCandidatesRef.current.push(message.candidate);
+            return;
+          }
           await pc.addIceCandidate(message.candidate);
         }
 
@@ -374,7 +385,7 @@ export default function VideoCall() {
         setStatus("Signaling message skipped. Rejoin if the call does not connect.");
       }
     },
-    [cleanRoomId, clearRemotePeer, getPeerConnection, makeOffer, peerId, resetCallState, sendMediaState, sendSignal]
+    [addPendingCandidates, cleanRoomId, clearRemotePeer, getPeerConnection, makeOffer, peerId, resetCallState, sendMediaState, sendSignal]
   );
 
   const startMedia = useCallback(async () => {
@@ -420,7 +431,6 @@ export default function VideoCall() {
         }
       };
 
-      channelRef.current!.onmessage = (event) => onSignal(event.data);
       socketRef.current?.on("signal", onSignal);
 
       sendSignal({ type: "room-check", roomId: cleanRoomId, peerId, requestId });
@@ -436,13 +446,45 @@ export default function VideoCall() {
       setRoomFull(false);
       setStatus("Checking room...");
 
-      channelRef.current?.close();
-      channelRef.current = new BroadcastChannel(`video-call-${cleanRoomId}`);
-
-      if (signalingUrl && !socketRef.current) {
+      if (!socketRef.current) {
         const { io } = await import("socket.io-client");
-        socketRef.current = io(signalingUrl, { transports: ["websocket"] });
-        socketRef.current.emit("join-room", { roomId: cleanRoomId, peerId });
+        const socket = io({
+          transports: ["websocket", "polling"],
+          timeout: 5000,
+        });
+        socketRef.current = socket;
+
+        socket.on("connect", () => {
+          socket.emit("join-room", { roomId: cleanRoomId, peerId });
+          if (joinedRef.current) {
+            socket.emit("signal", { type: "ready", roomId: cleanRoomId, peerId });
+            socket.emit("signal", {
+              type: "media-state",
+              roomId: cleanRoomId,
+              peerId,
+              micOn: micOnRef.current,
+              cameraOn: cameraOnRef.current,
+            });
+          }
+        });
+
+        await new Promise<void>((resolve, reject) => {
+          if (socket.connected) {
+            resolve();
+            return;
+          }
+
+          const onConnect = () => {
+            socket.off("connect_error", onError);
+            resolve();
+          };
+          const onError = (error: Error) => {
+            socket.off("connect", onConnect);
+            reject(error);
+          };
+          socket.once("connect", onConnect);
+          socket.once("connect_error", onError);
+        });
       }
 
       const canJoin = await checkRoomCapacity();
@@ -451,7 +493,6 @@ export default function VideoCall() {
         return;
       }
 
-      channelRef.current.onmessage = (event) => handleSignal(event.data);
       socketRef.current?.on("signal", handleSignal);
 
       setStatus("Opening camera...");
@@ -468,10 +509,14 @@ export default function VideoCall() {
           }
         }, delay);
       });
-    } catch {
-      resetCallState("Camera or microphone permission was blocked");
+    } catch (error) {
+      resetCallState(
+        error instanceof DOMException
+          ? "Camera or microphone permission was blocked"
+          : "Unable to reach the signaling server"
+      );
     }
-  }, [checkRoomCapacity, cleanRoomId, handleSignal, peerId, resetCallState, sendMediaState, sendSignal, signalingUrl, startMedia]);
+  }, [checkRoomCapacity, cleanRoomId, handleSignal, peerId, resetCallState, sendMediaState, sendSignal, startMedia]);
 
   const leaveRoom = useCallback(() => {
     if (joinedRef.current) sendSignal({ type: "leave", roomId: cleanRoomId, peerId });
