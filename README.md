@@ -9,7 +9,7 @@ npm install
 npm run dev
 ```
 
-Open [http://localhost:3001](http://localhost:3001), join a room, and open its invite link in another browser. The bundled `server.mjs` serves Next.js and the local WebSocket endpoint together.
+Open [http://localhost:3000](http://localhost:3000), join a room, and open its invite link in another browser. The bundled `server.mjs` serves Next.js and the local WebSocket endpoint together.
 
 For a production-style local run:
 

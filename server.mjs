@@ -4,7 +4,7 @@ import { WebSocketServer } from "ws";
 
 const dev = !process.argv.includes("--production");
 const hostname = process.env.VIDEO_CALL_HOST ?? "0.0.0.0";
-const port = Number.parseInt(process.env.PORT ?? "3001", 10);
+const port = Number.parseInt(process.env.PORT ?? "3000", 10);
 
 const httpServer = createServer((request, response) => {
   handle(request, response);
