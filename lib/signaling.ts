@@ -48,7 +48,7 @@ publisher?.on("error", (error) => {
   console.error("[signaling] Redis publisher error", error);
 });
 let subscriber: Redis | null = null;
-let subscriberStarting = false;
+let subscriberStartPromise: Promise<void> | null = null;
 let warnedAboutRedis = false;
 
 function normalizeRoomId(value: unknown): string | null {
@@ -91,7 +91,8 @@ function broadcastLocally(message: SignalMessage, excludedSocket?: WebSocket): v
 }
 
 async function startSubscriber(): Promise<void> {
-  if (subscriber || subscriberStarting) return;
+  if (subscriber) return;
+  if (subscriberStartPromise) return subscriberStartPromise;
 
   if (!publisher) {
     if (!warnedAboutRedis) {
@@ -101,30 +102,33 @@ async function startSubscriber(): Promise<void> {
     return;
   }
 
-  subscriberStarting = true;
-  const nextSubscriber = publisher.duplicate();
-  nextSubscriber.on("message", (channel, serialized) => {
-    if (channel !== relayChannel) return;
-    try {
-      const envelope = JSON.parse(serialized) as RelayEnvelope;
-      if (envelope.instanceId !== instanceId) broadcastLocally(envelope.message);
-    } catch {
-      // Ignore malformed relay entries.
-    }
-  });
-  nextSubscriber.on("error", (error) => {
-    console.error("[signaling] Redis subscriber error", error);
-  });
+  subscriberStartPromise = (async () => {
+    const nextSubscriber = publisher.duplicate();
+    nextSubscriber.on("message", (channel, serialized) => {
+      if (channel !== relayChannel) return;
+      try {
+        const envelope = JSON.parse(serialized) as RelayEnvelope;
+        if (envelope.instanceId !== instanceId) broadcastLocally(envelope.message);
+      } catch {
+        // Ignore malformed relay entries.
+      }
+    });
+    nextSubscriber.on("error", (error) => {
+      console.error("[signaling] Redis subscriber error", error);
+    });
 
-  try {
-    await nextSubscriber.subscribe(relayChannel);
-    subscriber = nextSubscriber;
-  } catch (error) {
-    console.error("[signaling] Unable to subscribe to Redis relay", error);
-    nextSubscriber.disconnect();
-  } finally {
-    subscriberStarting = false;
-  }
+    try {
+      await nextSubscriber.subscribe(relayChannel);
+      subscriber = nextSubscriber;
+    } catch (error) {
+      console.error("[signaling] Unable to subscribe to Redis relay", error);
+      nextSubscriber.disconnect();
+    } finally {
+      subscriberStartPromise = null;
+    }
+  })();
+
+  return subscriberStartPromise;
 }
 
 function publish(message: SignalMessage): void {
@@ -135,9 +139,9 @@ function publish(message: SignalMessage): void {
   });
 }
 
-export function registerConnection(socket: WebSocket): void {
+export async function registerConnection(socket: WebSocket): Promise<void> {
   connections.set(socket, { roomId: null, peerId: null });
-  void startSubscriber();
+  await startSubscriber();
 }
 
 export function unregisterConnection(socket: WebSocket): void {

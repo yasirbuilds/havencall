@@ -29,7 +29,7 @@ type SignalListener = (message: SignalMessage) => void | Promise<void>;
 
 const maxRoomMembers = 2;
 const roomCheckTimeoutMs = 650;
-const iceServers: RTCIceServer[] = [{ urls: "stun:stun.l.google.com:19302" }];
+const fallbackIceServers: RTCIceServer[] = [{ urls: "stun:stun.l.google.com:19302" }];
 
 function makeRoomId() {
   return Math.random().toString(36).slice(2, 6).toUpperCase();
@@ -58,6 +58,7 @@ export default function VideoCall() {
   const micOnRef = useRef(true);
   const cameraOnRef = useRef(true);
   const pcRef = useRef<RTCPeerConnection | null>(null);
+  const iceServersRef = useRef<RTCIceServer[]>(fallbackIceServers);
   const videoSenderRef = useRef<RTCRtpSender | null>(null);
   const audioSenderRef = useRef<RTCRtpSender | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
@@ -205,7 +206,7 @@ export default function VideoCall() {
   const getPeerConnection = useCallback(() => {
     if (pcRef.current) return pcRef.current;
 
-    const pc = new RTCPeerConnection({ iceServers });
+    const pc = new RTCPeerConnection({ iceServers: iceServersRef.current });
     remoteStreamRef.current = new MediaStream();
 
     pc.ontrack = (event) => {
@@ -420,6 +421,19 @@ export default function VideoCall() {
     setCameraOn(true);
   }, []);
 
+  const loadIceServers = useCallback(async () => {
+    try {
+      const response = await fetch("/api/ice", { cache: "no-store" });
+      if (!response.ok) return;
+      const data = (await response.json()) as { iceServers?: RTCIceServer[] };
+      if (Array.isArray(data.iceServers) && data.iceServers.length > 0) {
+        iceServersRef.current = data.iceServers;
+      }
+    } catch {
+      // STUN-only fallback still permits calls on networks with direct paths.
+    }
+  }, []);
+
   const checkRoomCapacity = useCallback(async () => {
     const requestId = crypto.randomUUID();
     const members = new Set<string>();
@@ -570,6 +584,7 @@ export default function VideoCall() {
       signalListenersRef.current.add(handleSignal);
 
       setStatus("Opening camera...");
+      await loadIceServers();
       await startMedia();
 
       joinedRef.current = true;
@@ -590,7 +605,7 @@ export default function VideoCall() {
           : "Unable to reach the signaling server"
       );
     }
-  }, [checkRoomCapacity, cleanRoomId, connectSignaling, handleSignal, peerId, resetCallState, sendMediaState, sendSignal, startMedia]);
+  }, [checkRoomCapacity, cleanRoomId, connectSignaling, handleSignal, loadIceServers, peerId, resetCallState, sendMediaState, sendSignal, startMedia]);
 
   const leaveRoom = useCallback(() => {
     if (joinedRef.current) sendSignal({ type: "leave", roomId: cleanRoomId, peerId });

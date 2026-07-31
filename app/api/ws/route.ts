@@ -13,13 +13,21 @@ export const maxDuration = 300;
 
 export function GET() {
   return experimental_upgradeWebSocket((socket) => {
-    registerConnection(socket);
+    // Do not process signaling until this Function instance is listening to
+    // Redis, otherwise early offers and ICE candidates can be lost.
+    const connectionReady = registerConnection(socket);
+    let closed = false;
 
     socket.on("message", (data: WebSocketData) => {
-      handleClientEvent(socket, data);
+      void connectionReady.then(() => {
+        if (!closed) handleClientEvent(socket, data);
+      });
     });
 
-    const close = () => unregisterConnection(socket);
+    const close = () => {
+      closed = true;
+      unregisterConnection(socket);
+    };
     socket.on("close", close);
     socket.on("error", close);
   });
