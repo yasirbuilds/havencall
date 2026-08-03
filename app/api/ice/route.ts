@@ -6,6 +6,7 @@ export function GET() {
   const turnCredential = process.env.TURN_CREDENTIAL?.trim();
 
   const iceServers: RTCIceServer[] = [
+    { urls: "stun:stun.relay.metered.ca:80" },
     { urls: "stun:stun.l.google.com:19302" },
   ];
 

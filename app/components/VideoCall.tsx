@@ -29,7 +29,22 @@ type SignalListener = (message: SignalMessage) => void | Promise<void>;
 
 const maxRoomMembers = 2;
 const roomCheckTimeoutMs = 650;
-const fallbackIceServers: RTCIceServer[] = [{ urls: "stun:stun.l.google.com:19302" }];
+const fallbackIceServers: RTCIceServer[] = [
+  { urls: "stun:stun.relay.metered.ca:80" },
+  { urls: "stun:stun.l.google.com:19302" },
+];
+const videoConstraints: MediaTrackConstraints = {
+  width: { ideal: 1280, min: 640 },
+  height: { ideal: 720, min: 360 },
+  frameRate: { ideal: 30, max: 30 },
+  facingMode: "user",
+};
+const audioConstraints: MediaTrackConstraints = {
+  echoCancellation: true,
+  noiseSuppression: true,
+  autoGainControl: true,
+};
+const maxVideoBitrate = 2_500_000;
 
 function makeRoomId() {
   return Math.random().toString(36).slice(2, 6).toUpperCase();
@@ -74,6 +89,10 @@ export default function VideoCall() {
   const knownPeerIdsRef = useRef<Set<string>>(new Set());
   const readyReplyPeerIdsRef = useRef<Set<string>>(new Set());
   const disconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const qualityMonitorRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const lastInboundVideoBytesRef = useRef<number | null>(null);
+  const stalledVideoChecksRef = useRef(0);
+  const iceRestartInProgressRef = useRef(false);
 
   const cleanRoomId = useMemo(() => roomId.trim().toUpperCase() || "MEET", [roomId]);
 
@@ -116,8 +135,18 @@ export default function VideoCall() {
     }
   }, []);
 
+  const clearQualityMonitor = useCallback(() => {
+    if (qualityMonitorRef.current) {
+      clearInterval(qualityMonitorRef.current);
+      qualityMonitorRef.current = null;
+    }
+    lastInboundVideoBytesRef.current = null;
+    stalledVideoChecksRef.current = 0;
+  }, []);
+
   const resetCallState = useCallback((nextStatus = "Idle", nextRoomFull = false) => {
     clearDisconnectTimer();
+    clearQualityMonitor();
     pcRef.current?.close();
     pcRef.current = null;
     videoSenderRef.current = null;
@@ -160,10 +189,11 @@ export default function VideoCall() {
     setMobileLocalPrimary(false);
     setRoomFull(nextRoomFull);
     setStatus(nextStatus);
-  }, [clearDisconnectTimer]);
+  }, [clearDisconnectTimer, clearQualityMonitor]);
 
   const clearRemotePeer = useCallback((nextStatus: string) => {
     clearDisconnectTimer();
+    clearQualityMonitor();
     pcRef.current?.close();
     pcRef.current = null;
     videoSenderRef.current = null;
@@ -187,7 +217,7 @@ export default function VideoCall() {
     setRemoteCameraOn(true);
     setMobileLocalPrimary(false);
     setStatus(nextStatus);
-  }, [clearDisconnectTimer]);
+  }, [clearDisconnectTimer, clearQualityMonitor]);
 
   const sendMediaState = useCallback(
     (nextMicOn = micOnRef.current, nextCameraOn = cameraOnRef.current) => {
@@ -203,11 +233,88 @@ export default function VideoCall() {
     [cleanRoomId, peerId, sendSignal]
   );
 
+  const configureVideoSender = useCallback(async (sender: RTCRtpSender) => {
+    const parameters = sender.getParameters();
+    parameters.degradationPreference = "balanced";
+    parameters.encodings = parameters.encodings?.length ? parameters.encodings : [{}];
+    parameters.encodings[0] = {
+      ...parameters.encodings[0],
+      active: true,
+      maxBitrate: maxVideoBitrate,
+      maxFramerate: 30,
+      scaleResolutionDownBy: 1,
+    };
+
+    try {
+      await sender.setParameters(parameters);
+    } catch {
+      // Some Safari versions reject encoding hints before negotiation.
+    }
+  }, []);
+
   const getPeerConnection = useCallback(() => {
     if (pcRef.current) return pcRef.current;
 
     const pc = new RTCPeerConnection({ iceServers: iceServersRef.current });
     remoteStreamRef.current = new MediaStream();
+
+    const restartIce = async () => {
+      if (
+        pcRef.current !== pc ||
+        pc.signalingState !== "stable" ||
+        iceRestartInProgressRef.current
+      ) return;
+
+      iceRestartInProgressRef.current = true;
+      try {
+        pc.restartIce();
+        const offer = await pc.createOffer({ iceRestart: true });
+        await pc.setLocalDescription(offer);
+        hasSentOfferRef.current = true;
+        sendSignal({ type: "offer", roomId: cleanRoomId, peerId, sdp: offer });
+        setStatus("Restoring connection...");
+      } catch {
+        setStatus("Connection recovery is retrying...");
+      } finally {
+        window.setTimeout(() => {
+          iceRestartInProgressRef.current = false;
+        }, 3000);
+      }
+    };
+
+    const startQualityMonitor = () => {
+      clearQualityMonitor();
+      qualityMonitorRef.current = setInterval(() => {
+        const inboundVideoTrack = pc.getReceivers().find(
+          (receiver) => receiver.track?.kind === "video"
+        )?.track;
+        if (!inboundVideoTrack || inboundVideoTrack.muted || inboundVideoTrack.readyState !== "live") {
+          lastInboundVideoBytesRef.current = null;
+          stalledVideoChecksRef.current = 0;
+          return;
+        }
+
+        void pc.getStats().then((reports) => {
+          let inboundVideoBytes: number | null = null;
+          reports.forEach((report) => {
+            if (report.type === "inbound-rtp" && report.kind === "video" && !report.isRemote) {
+              inboundVideoBytes = report.bytesReceived;
+            }
+          });
+
+          if (inboundVideoBytes === null) return;
+          stalledVideoChecksRef.current = inboundVideoBytes === lastInboundVideoBytesRef.current
+            ? stalledVideoChecksRef.current + 1
+            : 0;
+          lastInboundVideoBytesRef.current = inboundVideoBytes;
+
+          if (stalledVideoChecksRef.current >= 3) {
+            stalledVideoChecksRef.current = 0;
+            void restartIce();
+          }
+        }).catch(() => undefined);
+      }, 5000);
+    };
 
     pc.ontrack = (event) => {
       event.streams[0].getTracks().forEach((track) => {
@@ -241,6 +348,8 @@ export default function VideoCall() {
     pc.onconnectionstatechange = () => {
       if (pc.connectionState === "connected") {
         clearDisconnectTimer();
+        iceRestartInProgressRef.current = false;
+        if (!qualityMonitorRef.current) startQualityMonitor();
         setStatus("Connected");
       }
       if (pc.connectionState === "disconnected") {
@@ -248,25 +357,31 @@ export default function VideoCall() {
         if (!disconnectTimerRef.current) {
           disconnectTimerRef.current = setTimeout(() => {
             if (pcRef.current === pc && pc.connectionState !== "connected") {
-              clearRemotePeer("Guest connection lost");
+              disconnectTimerRef.current = null;
+              void restartIce();
             }
-          }, 8000);
+          }, 3000);
         }
       }
       if (pc.connectionState === "failed") {
-        setStatus("Connection issue. Waiting for guest...");
+        clearDisconnectTimer();
+        void restartIce();
       }
+      if (pc.connectionState === "closed") clearQualityMonitor();
     };
 
     localStreamRef.current?.getTracks().forEach((track) => {
       const sender = pc.addTrack(track, localStreamRef.current as MediaStream);
-      if (track.kind === "video") videoSenderRef.current = sender;
+      if (track.kind === "video") {
+        videoSenderRef.current = sender;
+        void configureVideoSender(sender);
+      }
       if (track.kind === "audio") audioSenderRef.current = sender;
     });
 
     pcRef.current = pc;
     return pc;
-  }, [cleanRoomId, clearDisconnectTimer, clearRemotePeer, peerId, sendSignal]);
+  }, [cleanRoomId, clearDisconnectTimer, clearQualityMonitor, configureVideoSender, peerId, sendSignal]);
 
   const makeOffer = useCallback(async () => {
     if (makingOfferRef.current || hasSentOfferRef.current) return;
@@ -370,8 +485,6 @@ export default function VideoCall() {
         }
 
         if (message.type === "offer") {
-          if (hasRemoteDescriptionRef.current && pc.signalingState === "stable") return;
-
           const offerCollision = makingOfferRef.current || pc.signalingState !== "stable";
           if (offerCollision && peerId < message.peerId) return;
           if (offerCollision) {
@@ -412,7 +525,12 @@ export default function VideoCall() {
   );
 
   const startMedia = useCallback(async () => {
-    const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: videoConstraints,
+      audio: audioConstraints,
+    });
+    const [videoTrack] = stream.getVideoTracks();
+    if (videoTrack) videoTrack.contentHint = "motion";
     localStreamRef.current = stream;
     if (localVideoRef.current) localVideoRef.current.srcObject = stream;
     micOnRef.current = true;
@@ -658,13 +776,16 @@ export default function VideoCall() {
     }
 
     try {
-      const cameraStream = await navigator.mediaDevices.getUserMedia({ video: true });
+      const cameraStream = await navigator.mediaDevices.getUserMedia({ video: videoConstraints });
       const [videoTrack] = cameraStream.getVideoTracks();
+      videoTrack.contentHint = "motion";
       stream.addTrack(videoTrack);
       if (videoSenderRef.current) {
         await videoSenderRef.current.replaceTrack(videoTrack);
+        await configureVideoSender(videoSenderRef.current);
       } else if (pcRef.current) {
         videoSenderRef.current = pcRef.current.addTrack(videoTrack, stream);
+        await configureVideoSender(videoSenderRef.current);
       }
       if (localVideoRef.current) localVideoRef.current.srcObject = stream;
       cameraOnRef.current = true;
